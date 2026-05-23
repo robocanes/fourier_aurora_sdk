@@ -1,0 +1,8 @@
+Config:
+  RobotName: gr2
+  HardwareType: null
+
+  RunType: 0 # 0 run simulator / 1 control real robot
+  UseJoyStick: false # use as default
+  DomainID: 123
+
