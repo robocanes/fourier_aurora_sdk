@@ -101,6 +101,8 @@ class UpperBodyPolicyRunner:
         self.latest_imu_quat = None
         self.latest_imu_angular_velocity = None
         self.latest_projected_gravity = None
+        self.entry_start_time = None
+        self.entry_action_start = DEFAULT_ACTION_POSITION.copy()
 
         policy_path = args.policy
         if policy_path is None:
@@ -267,6 +269,29 @@ class UpperBodyPolicyRunner:
         self.commands_filtered[1] = numpy.clip(self.commands_filtered[1], -self.args.max_vy, self.args.max_vy)
         self.commands_filtered[2] = numpy.clip(self.commands_filtered[2], -self.args.max_yaw, self.args.max_yaw)
 
+    def entry_ramp(self):
+        if self.entry_start_time is None:
+            return 1.0
+        duration = max(0.0, self.args.entry_ramp_s)
+        if duration <= 0.0:
+            return 1.0
+
+        phase = numpy.clip((time.monotonic() - self.entry_start_time) / duration, 0.0, 1.0)
+        return float(phase * phase * (3.0 - 2.0 * phase))
+
+    def reset_policy_state_from_robot(self):
+        q, _ = self.read_joint_state()
+        action_q = numpy.clip(q[ACTION_TO_WHOLE_BODY_INDEX], ACTION_MIN, ACTION_MAX)
+        self.entry_action_start = action_q.astype(numpy.float32)
+        self.policy_action = numpy.clip(
+            (self.entry_action_start - DEFAULT_ACTION_POSITION) / ACTION_SCALE,
+            RAW_ACTION_CLIP_MIN,
+            RAW_ACTION_CLIP_MAX,
+        ).astype(numpy.float32)
+        self.commands_filtered[:] = 0.0
+        self.obs_stack = None
+        self.entry_start_time = time.monotonic()
+
     def make_observation(self):
         imu_quat = numpy.asarray(self.client.get_base_data("quat_xyzw"), dtype=numpy.float32)
         imu_angular_velocity = numpy.asarray(self.client.get_base_data("omega_B"), dtype=numpy.float32)
@@ -329,6 +354,9 @@ class UpperBodyPolicyRunner:
     def step_policy(self, loop_overrun_s=0.0):
         step_start = time.monotonic()
         self.update_command()
+        ramp = self.entry_ramp()
+        if ramp < 1.0:
+            self.commands_filtered *= ramp
         obs_stack = self.make_observation()
 
         with torch.no_grad():
@@ -338,10 +366,15 @@ class UpperBodyPolicyRunner:
             raise RuntimeError(f"Expected {POLICY_NUM_ACTIONS} actions, got {raw_action.shape[0]}")
 
         raw_action = numpy.clip(raw_action, RAW_ACTION_CLIP_MIN, RAW_ACTION_CLIP_MAX)
-        self.policy_action = raw_action.astype(numpy.float32)
-
-        action_target = DEFAULT_ACTION_POSITION + self.policy_action * ACTION_SCALE
-        action_target = numpy.clip(action_target, ACTION_MIN, ACTION_MAX)
+        policy_action_target = DEFAULT_ACTION_POSITION + raw_action.astype(numpy.float32) * ACTION_SCALE
+        policy_action_target = numpy.clip(policy_action_target, ACTION_MIN, ACTION_MAX)
+        action_target = self.entry_action_start * (1.0 - ramp) + policy_action_target * ramp
+        action_target = numpy.clip(action_target, ACTION_MIN, ACTION_MAX).astype(numpy.float32)
+        self.policy_action = numpy.clip(
+            (action_target - DEFAULT_ACTION_POSITION) / ACTION_SCALE,
+            RAW_ACTION_CLIP_MIN,
+            RAW_ACTION_CLIP_MAX,
+        ).astype(numpy.float32)
 
         whole_body_target = DEFAULT_WHOLE_BODY_POSITION.copy()
         whole_body_target[ACTION_TO_WHOLE_BODY_INDEX] = action_target
@@ -357,6 +390,7 @@ class UpperBodyPolicyRunner:
                 f"{self.commands_filtered[0]:+.3f},"
                 f"{self.commands_filtered[1]:+.3f},"
                 f"{self.commands_filtered[2]:+.3f} "
+                f"ramp={ramp:.2f} "
                 f"action_abs_max={numpy.max(numpy.abs(self.policy_action)):.3f}"
             )
 
@@ -368,8 +402,9 @@ class UpperBodyPolicyRunner:
         time.sleep(1.0)
 
         input("When the robot is stable, press Enter to switch to FSM state 10 (UserCmd)")
+        self.reset_policy_state_from_robot()
         self.client.set_fsm_state(10)
-        time.sleep(0.5)
+        time.sleep(self.args.entry_hold_s)
         self.set_pd()
 
         period = 1.0 / self.args.rate
@@ -444,6 +479,8 @@ def parse_args():
     parser.add_argument("--filter-y", type=float, default=0.40)
     parser.add_argument("--filter-yaw", type=float, default=0.00)
     parser.add_argument("--print-period", type=float, default=1.0)
+    parser.add_argument("--entry-ramp-s", type=float, default=1.0)
+    parser.add_argument("--entry-hold-s", type=float, default=0.1)
     parser.add_argument("--log-path", default=None)
     parser.add_argument("--log-flush-rows", type=int, default=50)
     parser.add_argument("--no-log", action="store_true")
