@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import csv
 import os
 import struct
 import sys
@@ -92,21 +93,72 @@ class UpperBodyPolicyRunner:
         self.joystick = None
         self.joystick_device = None
         self.joystick_thread = None
+        self.log_file = None
+        self.log_writer = None
+        self.log_rows_since_flush = 0
+        self.latest_q = None
+        self.latest_qd = None
+        self.latest_imu_quat = None
+        self.latest_imu_angular_velocity = None
+        self.latest_projected_gravity = None
 
         policy_path = args.policy
         if policy_path is None:
             policy_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
-                "policy_gr2_upper_body_jit.pt",
+                "policy_gr2_dynamic_walk_model13999_jit.pt",
             )
         if not os.path.exists(policy_path):
             raise FileNotFoundError(
                 f"Policy file not found: {policy_path}\n"
-                "Copy policy_jit.pt to policy_gr2_upper_body_jit.pt first."
+                "Copy/export the proven model_13999 JIT policy to "
+                "policy_gr2_dynamic_walk_model13999_jit.pt first."
             )
         self.policy_model = torch.jit.load(policy_path, map_location=torch.device("cpu"))
         self.policy_model.eval()
         print(f"Loaded policy: {policy_path}")
+        self.setup_logging(policy_path)
+
+    def setup_logging(self, policy_path):
+        if self.args.no_log:
+            return
+
+        log_path = self.args.log_path
+        if log_path is None:
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            log_path = os.path.join(log_dir, f"dynamic_walk_model13999_{timestamp}.csv")
+        else:
+            log_dir = os.path.dirname(os.path.abspath(log_path))
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+
+        self.log_file = open(log_path, "w", newline="")
+        self.log_writer = csv.writer(self.log_file)
+
+        header = [
+            "wall_time_s",
+            "monotonic_s",
+            "step_elapsed_s",
+            "loop_overrun_s",
+            "policy_path",
+            "cmd_x",
+            "cmd_y",
+            "cmd_yaw",
+            "action_abs_max",
+        ]
+        header += [f"imu_quat_{axis}" for axis in ("x", "y", "z", "w")]
+        header += [f"imu_omega_{axis}" for axis in ("x", "y", "z")]
+        header += [f"projected_gravity_{axis}" for axis in ("x", "y", "z")]
+        header += [f"raw_action_{i:02d}" for i in range(POLICY_NUM_ACTIONS)]
+        header += [f"target_action_joint_{i:02d}" for i in range(POLICY_NUM_ACTIONS)]
+        header += [f"q_{i:02d}" for i in range(ROBOT_NUM_JOINTS)]
+        header += [f"qd_{i:02d}" for i in range(ROBOT_NUM_JOINTS)]
+        self.log_writer.writerow(header)
+        self.log_file.flush()
+        self.policy_path = policy_path
+        print(f"Logging telemetry to: {log_path}")
 
     def setup_joystick(self):
         if not self.args.joystick:
@@ -223,6 +275,11 @@ class UpperBodyPolicyRunner:
         torch_quat = torch.from_numpy(imu_quat).float().unsqueeze(0)
         torch_gravity = torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32)
         projected_gravity = torch_quat_rotate_inverse(torch_quat, torch_gravity).squeeze(0).numpy()
+        self.latest_q = q
+        self.latest_qd = qd
+        self.latest_imu_quat = imu_quat
+        self.latest_imu_angular_velocity = imu_angular_velocity
+        self.latest_projected_gravity = projected_gravity
 
         obs = numpy.concatenate([
             self.commands_filtered,
@@ -243,7 +300,34 @@ class UpperBodyPolicyRunner:
             self.obs_stack = torch.cat([self.obs_stack[:, OBS_LEN:], obs_t], dim=1).float()
         return self.obs_stack
 
-    def step_policy(self):
+    def write_telemetry(self, step_elapsed_s, loop_overrun_s, action_target):
+        if self.log_writer is None:
+            return
+
+        row = [
+            time.time(),
+            time.monotonic(),
+            step_elapsed_s,
+            loop_overrun_s,
+            self.policy_path,
+            *self.commands_filtered.tolist(),
+            float(numpy.max(numpy.abs(self.policy_action))),
+            *self.latest_imu_quat.tolist(),
+            *self.latest_imu_angular_velocity.tolist(),
+            *self.latest_projected_gravity.tolist(),
+            *self.policy_action.tolist(),
+            *action_target.tolist(),
+            *self.latest_q.tolist(),
+            *self.latest_qd.tolist(),
+        ]
+        self.log_writer.writerow(row)
+        self.log_rows_since_flush += 1
+        if self.log_rows_since_flush >= self.args.log_flush_rows:
+            self.log_file.flush()
+            self.log_rows_since_flush = 0
+
+    def step_policy(self, loop_overrun_s=0.0):
+        step_start = time.monotonic()
         self.update_command()
         obs_stack = self.make_observation()
 
@@ -263,6 +347,7 @@ class UpperBodyPolicyRunner:
         whole_body_target[ACTION_TO_WHOLE_BODY_INDEX] = action_target
 
         self.client.set_joint_positions({"whole_body": whole_body_target.astype(numpy.float64)})
+        self.write_telemetry(time.monotonic() - step_start, loop_overrun_s, action_target)
 
         now = time.monotonic()
         if not hasattr(self, "_last_print") or now - self._last_print > self.args.print_period:
@@ -289,10 +374,11 @@ class UpperBodyPolicyRunner:
 
         period = 1.0 / self.args.rate
         next_tick = time.monotonic()
-        print(f"Running upper-body policy at {self.args.rate:.1f} Hz. Press Ctrl-C to stop.")
+        print(f"Running dynamic-walk policy at {self.args.rate:.1f} Hz. Press Ctrl-C to stop.")
 
         while not self.stop_event.is_set():
-            self.step_policy()
+            loop_overrun_s = max(0.0, time.monotonic() - next_tick)
+            self.step_policy(loop_overrun_s)
             next_tick += period
             sleep_time = next_tick - time.monotonic()
             if sleep_time > 0.0:
@@ -320,6 +406,12 @@ class UpperBodyPolicyRunner:
                 self.joystick_device.close()
         except Exception:
             pass
+        try:
+            if self.log_file is not None:
+                self.log_file.flush()
+                self.log_file.close()
+        except Exception:
+            pass
         self.client.close()
 
 
@@ -335,7 +427,7 @@ def torch_quat_rotate_inverse(q, v):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the GR2 21-action upper-body walking policy through Aurora UserCmd.")
+    parser = argparse.ArgumentParser(description="Run the GR2 21-action dynamic-walk policy through Aurora UserCmd.")
     parser.add_argument("--domain-id", type=int, default=123)
     parser.add_argument("--robot-name", default="gr2")
     parser.add_argument("--policy", default=None)
@@ -347,11 +439,14 @@ def parse_args():
     parser.add_argument("--yaw", type=float, default=0.0)
     parser.add_argument("--max-vx", type=float, default=0.35)
     parser.add_argument("--max-vy", type=float, default=0.08)
-    parser.add_argument("--max-yaw", type=float, default=0.70)
+    parser.add_argument("--max-yaw", type=float, default=0.35)
     parser.add_argument("--filter-x", type=float, default=0.92)
     parser.add_argument("--filter-y", type=float, default=0.40)
     parser.add_argument("--filter-yaw", type=float, default=0.00)
     parser.add_argument("--print-period", type=float, default=1.0)
+    parser.add_argument("--log-path", default=None)
+    parser.add_argument("--log-flush-rows", type=int, default=50)
+    parser.add_argument("--no-log", action="store_true")
     return parser.parse_args()
 
 
