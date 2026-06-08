@@ -306,6 +306,9 @@ class UpperBodyPolicyRunner:
         self.commands_filtered[2] = numpy.clip(self.commands_filtered[2], -self.args.max_yaw, self.args.max_yaw)
 
     def sequence_command(self):
+        if self.args.straight_turn_distance > 0.0:
+            return self.straight_turn_sequence_command()
+
         distance = max(0.0, self.args.out_back_distance)
         forward_vx = max(1.0e-6, abs(self.args.out_vx))
         backward_vx = -max(1.0e-6, abs(self.args.back_vx))
@@ -320,6 +323,35 @@ class UpperBodyPolicyRunner:
             return numpy.zeros(3, dtype=numpy.float32)
         if elapsed < forward_duration + stop_duration + backward_duration:
             return numpy.array([backward_vx, 0.0, 0.0], dtype=numpy.float32)
+
+        if self.args.sequence_exit:
+            self.stop_event.set()
+        return numpy.zeros(3, dtype=numpy.float32)
+
+    def straight_turn_sequence_command(self):
+        distance = max(0.0, self.args.straight_turn_distance)
+        forward_vx = max(1.0e-6, abs(self.args.straight_turn_vx))
+        turn_yaw = max(1.0e-6, abs(self.args.straight_turn_yaw))
+        turn_angle_rad = numpy.deg2rad(max(0.0, self.args.straight_turn_angle_deg))
+        forward_duration = distance / forward_vx
+        turn_duration = turn_angle_rad / turn_yaw
+        stop_duration = max(0.0, self.args.sequence_stop_s)
+
+        phases = [
+            (forward_duration, numpy.array([forward_vx, 0.0, 0.0], dtype=numpy.float32)),
+            (stop_duration, numpy.zeros(3, dtype=numpy.float32)),
+            (turn_duration, numpy.array([0.0, 0.0, -turn_yaw], dtype=numpy.float32)),
+            (stop_duration, numpy.zeros(3, dtype=numpy.float32)),
+            (forward_duration, numpy.array([forward_vx, 0.0, 0.0], dtype=numpy.float32)),
+            (stop_duration, numpy.zeros(3, dtype=numpy.float32)),
+            (turn_duration, numpy.array([0.0, 0.0, turn_yaw], dtype=numpy.float32)),
+        ]
+
+        elapsed = time.monotonic() - self.sequence_start_time
+        for duration, command in phases:
+            if elapsed < duration:
+                return command
+            elapsed -= duration
 
         if self.args.sequence_exit:
             self.stop_event.set()
@@ -532,16 +564,29 @@ class UpperBodyPolicyRunner:
     def run(self):
         self.setup_joystick()
 
-        input("Press Enter to switch to FSM state 2 (PD stand)")
-        self.client.set_fsm_state(2)
+        input(f"Press Enter to switch to FSM state {self.args.stand_fsm_state} (stand)")
+        self.client.set_fsm_state(self.args.stand_fsm_state)
         time.sleep(1.0)
 
-        input("When the robot is stable, press Enter to switch to FSM state 10 (UserCmd)")
+        input(
+            "When the robot is stable, press Enter to switch to "
+            f"FSM state {self.args.usercmd_fsm_state} (UserCmd)"
+        )
         self.reset_policy_state_from_robot()
-        self.client.set_fsm_state(10)
+        self.client.set_fsm_state(self.args.usercmd_fsm_state)
         time.sleep(self.args.entry_hold_s)
         self.set_pd()
-        if self.args.out_back_distance > 0.0:
+        if self.args.straight_turn_distance > 0.0:
+            self.sequence_start_time = time.monotonic()
+            print(
+                "Running straight/turn sequence: "
+                f"+{self.args.straight_turn_distance:.2f}m at {abs(self.args.straight_turn_vx):.2f}m/s, "
+                f"right {self.args.straight_turn_angle_deg:.0f}deg at {abs(self.args.straight_turn_yaw):.2f}rad/s, "
+                f"+{self.args.straight_turn_distance:.2f}m, "
+                f"left {self.args.straight_turn_angle_deg:.0f}deg, "
+                f"stop {self.args.sequence_stop_s:.1f}s between phases"
+            )
+        elif self.args.out_back_distance > 0.0:
             self.sequence_start_time = time.monotonic()
             print(
                 "Running out/back sequence: "
@@ -571,7 +616,7 @@ class UpperBodyPolicyRunner:
         try:
             self.client.set_joint_positions({"whole_body": DEFAULT_WHOLE_BODY_POSITION.astype(numpy.float64)})
             time.sleep(0.1)
-            self.client.set_fsm_state(2)
+            self.client.set_fsm_state(self.args.exit_fsm_state)
         except Exception:
             pass
         try:
@@ -610,6 +655,9 @@ def parse_args():
     parser.add_argument("--robot-name", default="gr2")
     parser.add_argument("--policy", default=None)
     parser.add_argument("--rate", type=float, default=50.0)
+    parser.add_argument("--stand-fsm-state", type=int, default=2, help="FSM state used for the initial stable stand.")
+    parser.add_argument("--usercmd-fsm-state", type=int, default=10, help="FSM state used while streaming policy targets.")
+    parser.add_argument("--exit-fsm-state", type=int, default=2, help="FSM state restored during shutdown.")
     parser.add_argument("--joystick", action="store_true")
     parser.add_argument("--joystick-device", default="/dev/input/js0")
     parser.add_argument("--vx", type=float, default=0.0)
@@ -618,6 +666,10 @@ def parse_args():
     parser.add_argument("--out-back-distance", type=float, default=0.0)
     parser.add_argument("--out-vx", type=float, default=0.25)
     parser.add_argument("--back-vx", type=float, default=-0.15)
+    parser.add_argument("--straight-turn-distance", type=float, default=0.0)
+    parser.add_argument("--straight-turn-vx", type=float, default=0.25)
+    parser.add_argument("--straight-turn-yaw", type=float, default=0.60)
+    parser.add_argument("--straight-turn-angle-deg", type=float, default=90.0)
     parser.add_argument("--sequence-stop-s", type=float, default=1.5)
     parser.add_argument("--sequence-exit", action="store_true")
     parser.add_argument("--max-vx", type=float, default=0.35)
@@ -672,11 +724,20 @@ def parse_args():
 
     if args.out_back_distance < 0.0:
         parser.error(f"--out-back-distance must be non-negative; got {args.out_back_distance}")
+    if args.straight_turn_distance < 0.0:
+        parser.error(f"--straight-turn-distance must be non-negative; got {args.straight_turn_distance}")
     if args.out_back_distance > 0.0:
         if abs(args.out_vx) <= 1.0e-6:
             parser.error("--out-vx must be non-zero when --out-back-distance is used")
         if abs(args.back_vx) <= 1.0e-6:
             parser.error("--back-vx must be non-zero when --out-back-distance is used")
+    if args.straight_turn_distance > 0.0:
+        if abs(args.straight_turn_vx) <= 1.0e-6:
+            parser.error("--straight-turn-vx must be non-zero when --straight-turn-distance is used")
+        if abs(args.straight_turn_yaw) <= 1.0e-6:
+            parser.error("--straight-turn-yaw must be non-zero when --straight-turn-distance is used")
+        if args.straight_turn_angle_deg < 0.0:
+            parser.error(f"--straight-turn-angle-deg must be non-negative; got {args.straight_turn_angle_deg}")
 
     return args
 
