@@ -17,6 +17,7 @@ ROBOT_NUM_JOINTS = 29
 POLICY_NUM_ACTIONS = 21
 OBS_LEN = 88
 STACK_SIZE = 5
+ARM_ACTION_INDICES = numpy.array([13, 14, 15, 16, 17, 18, 19, 20], dtype=numpy.int64)
 
 GROUP_NAMES = [
     "left_leg",
@@ -103,6 +104,12 @@ class UpperBodyPolicyRunner:
         self.latest_projected_gravity = None
         self.entry_start_time = None
         self.entry_action_start = DEFAULT_ACTION_POSITION.copy()
+        self.sequence_start_time = None
+        self.arm_swing_phase = 0.0
+        self.last_policy_time = None
+        self.action_scale = ACTION_SCALE.copy()
+        self.action_scale[[4, 10]] = args.ankle_pitch_scale
+        self.action_scale[[5, 11]] = args.ankle_roll_scale
 
         policy_path = args.policy
         if policy_path is None:
@@ -128,9 +135,12 @@ class UpperBodyPolicyRunner:
         log_path = self.args.log_path
         if log_path is None:
             log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+            if self.args.log_folder:
+                log_dir = os.path.join(log_dir, self.args.log_folder, "logs")
             os.makedirs(log_dir, exist_ok=True)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            log_path = os.path.join(log_dir, f"dynamic_walk_model13999_{timestamp}.csv")
+            policy_name = os.path.splitext(os.path.basename(policy_path))[0]
+            log_path = os.path.join(log_dir, f"dynamic_walk_{policy_name}_{timestamp}.csv")
         else:
             log_dir = os.path.dirname(os.path.abspath(log_path))
             if log_dir:
@@ -145,6 +155,30 @@ class UpperBodyPolicyRunner:
             "step_elapsed_s",
             "loop_overrun_s",
             "policy_path",
+            "rate_hz",
+            "max_vx",
+            "max_vy",
+            "max_yaw",
+            "ankle_pitch_scale",
+            "ankle_roll_scale",
+            "filter_x",
+            "filter_y",
+            "filter_yaw",
+            "entry_ramp_s",
+            "entry_hold_s",
+            "free_arms",
+            "arm_shoulder_pitch",
+            "arm_shoulder_roll",
+            "arm_shoulder_yaw",
+            "arm_elbow_pitch",
+            "arm_swing_amplitude",
+            "arm_swing_elbow_amplitude",
+            "arm_swing_frequency",
+            "arm_swing_vx_scale",
+            "joystick_axis_left_x",
+            "joystick_axis_left_y",
+            "joystick_axis_right_x",
+            "joystick_axis_right_y",
             "cmd_x",
             "cmd_y",
             "cmd_yaw",
@@ -260,6 +294,8 @@ class UpperBodyPolicyRunner:
                 commands_norm[1] * self.args.max_vy,
                 commands_norm[2] * self.args.max_yaw,
             ], dtype=numpy.float32)
+        elif self.sequence_start_time is not None:
+            commands = self.sequence_command()
         else:
             commands = numpy.array([self.args.vx, self.args.vy, self.args.yaw], dtype=numpy.float32)
 
@@ -268,6 +304,26 @@ class UpperBodyPolicyRunner:
         self.commands_filtered[0] = numpy.clip(self.commands_filtered[0], -self.args.max_vx, self.args.max_vx)
         self.commands_filtered[1] = numpy.clip(self.commands_filtered[1], -self.args.max_vy, self.args.max_vy)
         self.commands_filtered[2] = numpy.clip(self.commands_filtered[2], -self.args.max_yaw, self.args.max_yaw)
+
+    def sequence_command(self):
+        distance = max(0.0, self.args.out_back_distance)
+        forward_vx = max(1.0e-6, abs(self.args.out_vx))
+        backward_vx = -max(1.0e-6, abs(self.args.back_vx))
+        forward_duration = distance / forward_vx
+        stop_duration = max(0.0, self.args.sequence_stop_s)
+        backward_duration = distance / abs(backward_vx)
+
+        elapsed = time.monotonic() - self.sequence_start_time
+        if elapsed < forward_duration:
+            return numpy.array([forward_vx, 0.0, 0.0], dtype=numpy.float32)
+        if elapsed < forward_duration + stop_duration:
+            return numpy.zeros(3, dtype=numpy.float32)
+        if elapsed < forward_duration + stop_duration + backward_duration:
+            return numpy.array([backward_vx, 0.0, 0.0], dtype=numpy.float32)
+
+        if self.args.sequence_exit:
+            self.stop_event.set()
+        return numpy.zeros(3, dtype=numpy.float32)
 
     def entry_ramp(self):
         if self.entry_start_time is None:
@@ -284,13 +340,15 @@ class UpperBodyPolicyRunner:
         action_q = numpy.clip(q[ACTION_TO_WHOLE_BODY_INDEX], ACTION_MIN, ACTION_MAX)
         self.entry_action_start = action_q.astype(numpy.float32)
         self.policy_action = numpy.clip(
-            (self.entry_action_start - DEFAULT_ACTION_POSITION) / ACTION_SCALE,
+            (self.entry_action_start - DEFAULT_ACTION_POSITION) / self.action_scale,
             RAW_ACTION_CLIP_MIN,
             RAW_ACTION_CLIP_MAX,
         ).astype(numpy.float32)
         self.commands_filtered[:] = 0.0
         self.obs_stack = None
         self.entry_start_time = time.monotonic()
+        self.arm_swing_phase = 0.0
+        self.last_policy_time = None
 
     def make_observation(self):
         imu_quat = numpy.asarray(self.client.get_base_data("quat_xyzw"), dtype=numpy.float32)
@@ -335,6 +393,30 @@ class UpperBodyPolicyRunner:
             step_elapsed_s,
             loop_overrun_s,
             self.policy_path,
+            self.args.rate,
+            self.args.max_vx,
+            self.args.max_vy,
+            self.args.max_yaw,
+            self.args.ankle_pitch_scale,
+            self.args.ankle_roll_scale,
+            self.args.filter_x,
+            self.args.filter_y,
+            self.args.filter_yaw,
+            self.args.entry_ramp_s,
+            self.args.entry_hold_s,
+            int(self.args.free_arms),
+            self.args.arm_shoulder_pitch,
+            self.args.arm_shoulder_roll,
+            self.args.arm_shoulder_yaw,
+            self.args.arm_elbow_pitch,
+            self.args.arm_swing_amplitude,
+            self.args.arm_swing_elbow_amplitude,
+            self.args.arm_swing_frequency,
+            self.args.arm_swing_vx_scale,
+            self.axis_left[0],
+            self.axis_left[1],
+            self.axis_right[0],
+            self.axis_right[1],
             *self.commands_filtered.tolist(),
             float(numpy.max(numpy.abs(self.policy_action))),
             *self.latest_imu_quat.tolist(),
@@ -354,6 +436,7 @@ class UpperBodyPolicyRunner:
     def step_policy(self, loop_overrun_s=0.0):
         step_start = time.monotonic()
         self.update_command()
+        self.update_arm_swing_phase(step_start)
         ramp = self.entry_ramp()
         if ramp < 1.0:
             self.commands_filtered *= ramp
@@ -366,12 +449,18 @@ class UpperBodyPolicyRunner:
             raise RuntimeError(f"Expected {POLICY_NUM_ACTIONS} actions, got {raw_action.shape[0]}")
 
         raw_action = numpy.clip(raw_action, RAW_ACTION_CLIP_MIN, RAW_ACTION_CLIP_MAX)
-        policy_action_target = DEFAULT_ACTION_POSITION + raw_action.astype(numpy.float32) * ACTION_SCALE
+        policy_action_target = DEFAULT_ACTION_POSITION + raw_action.astype(numpy.float32) * self.action_scale
         policy_action_target = numpy.clip(policy_action_target, ACTION_MIN, ACTION_MAX)
         action_target = self.entry_action_start * (1.0 - ramp) + policy_action_target * ramp
+        if not self.args.free_arms:
+            arm_hang_target = self.arm_hang_action_position()
+            action_target[ARM_ACTION_INDICES] = (
+                self.entry_action_start[ARM_ACTION_INDICES] * (1.0 - ramp)
+                + arm_hang_target[ARM_ACTION_INDICES] * ramp
+            )
         action_target = numpy.clip(action_target, ACTION_MIN, ACTION_MAX).astype(numpy.float32)
         self.policy_action = numpy.clip(
-            (action_target - DEFAULT_ACTION_POSITION) / ACTION_SCALE,
+            (action_target - DEFAULT_ACTION_POSITION) / self.action_scale,
             RAW_ACTION_CLIP_MIN,
             RAW_ACTION_CLIP_MAX,
         ).astype(numpy.float32)
@@ -394,6 +483,52 @@ class UpperBodyPolicyRunner:
                 f"action_abs_max={numpy.max(numpy.abs(self.policy_action)):.3f}"
             )
 
+    def arm_hang_action_position(self):
+        action_position = DEFAULT_ACTION_POSITION.copy()
+        action_position[13] = self.args.arm_shoulder_pitch
+        action_position[14] = self.args.arm_shoulder_roll
+        action_position[15] = self.args.arm_shoulder_yaw
+        action_position[16] = self.args.arm_elbow_pitch
+        action_position[17] = self.args.arm_shoulder_pitch
+        action_position[18] = -self.args.arm_shoulder_roll
+        action_position[19] = -self.args.arm_shoulder_yaw
+        action_position[20] = self.args.arm_elbow_pitch
+        swing_scale = self.arm_swing_command_scale()
+        if self.args.arm_swing_amplitude > 0.0 and swing_scale > 0.0:
+            swing = self.args.arm_swing_amplitude * swing_scale * numpy.sin(self.arm_swing_phase)
+            elbow_swing = self.args.arm_swing_elbow_amplitude * swing_scale * (
+                0.5 + 0.5 * numpy.sin(self.arm_swing_phase + numpy.pi)
+            )
+            if self.commands_filtered[0] < 0.0:
+                swing = -swing
+            action_position[13] += swing
+            action_position[17] -= swing
+            action_position[16] += elbow_swing
+            action_position[20] += elbow_swing
+        return action_position.astype(numpy.float32)
+
+    def arm_swing_command_scale(self):
+        vx_scale = max(1.0e-6, self.args.arm_swing_vx_scale)
+        forward_scale = abs(float(self.commands_filtered[0])) / vx_scale
+        yaw_scale = 0.0
+        if abs(self.args.max_yaw) > 1.0e-6:
+            yaw_scale = 0.35 * abs(float(self.commands_filtered[2])) / abs(self.args.max_yaw)
+        return float(numpy.clip(max(forward_scale, yaw_scale), 0.0, 1.0))
+
+    def update_arm_swing_phase(self, now):
+        if self.last_policy_time is None:
+            self.last_policy_time = now
+            return
+        dt = max(0.0, min(0.1, now - self.last_policy_time))
+        self.last_policy_time = now
+        swing_scale = self.arm_swing_command_scale()
+        if swing_scale <= 1.0e-4:
+            return
+        self.arm_swing_phase = (
+            self.arm_swing_phase
+            + 2.0 * numpy.pi * self.args.arm_swing_frequency * swing_scale * dt
+        ) % (2.0 * numpy.pi)
+
     def run(self):
         self.setup_joystick()
 
@@ -406,6 +541,14 @@ class UpperBodyPolicyRunner:
         self.client.set_fsm_state(10)
         time.sleep(self.args.entry_hold_s)
         self.set_pd()
+        if self.args.out_back_distance > 0.0:
+            self.sequence_start_time = time.monotonic()
+            print(
+                "Running out/back sequence: "
+                f"+{self.args.out_back_distance:.2f}m at {abs(self.args.out_vx):.2f}m/s, "
+                f"stop {self.args.sequence_stop_s:.1f}s, "
+                f"-{self.args.out_back_distance:.2f}m at {abs(self.args.back_vx):.2f}m/s"
+            )
 
         period = 1.0 / self.args.rate
         next_tick = time.monotonic()
@@ -472,19 +615,70 @@ def parse_args():
     parser.add_argument("--vx", type=float, default=0.0)
     parser.add_argument("--vy", type=float, default=0.0)
     parser.add_argument("--yaw", type=float, default=0.0)
+    parser.add_argument("--out-back-distance", type=float, default=0.0)
+    parser.add_argument("--out-vx", type=float, default=0.25)
+    parser.add_argument("--back-vx", type=float, default=-0.15)
+    parser.add_argument("--sequence-stop-s", type=float, default=1.5)
+    parser.add_argument("--sequence-exit", action="store_true")
     parser.add_argument("--max-vx", type=float, default=0.35)
     parser.add_argument("--max-vy", type=float, default=0.08)
     parser.add_argument("--max-yaw", type=float, default=0.35)
+    parser.add_argument("--ankle-pitch-scale", type=float, default=1.0)
+    parser.add_argument("--ankle-roll-scale", type=float, default=1.0)
     parser.add_argument("--filter-x", type=float, default=0.92)
     parser.add_argument("--filter-y", type=float, default=0.40)
     parser.add_argument("--filter-yaw", type=float, default=0.00)
     parser.add_argument("--print-period", type=float, default=1.0)
     parser.add_argument("--entry-ramp-s", type=float, default=1.0)
     parser.add_argument("--entry-hold-s", type=float, default=0.1)
+    parser.add_argument("--free-arms", action="store_true", help="Use policy arm actions instead of holding a neutral hanging arm pose.")
+    parser.add_argument("--arm-shoulder-pitch", type=float, default=0.0)
+    parser.add_argument("--arm-shoulder-roll", type=float, default=0.0)
+    parser.add_argument("--arm-shoulder-yaw", type=float, default=0.0)
+    parser.add_argument("--arm-elbow-pitch", type=float, default=0.0)
+    parser.add_argument("--arm-swing-amplitude", type=float, default=0.0)
+    parser.add_argument("--arm-swing-elbow-amplitude", type=float, default=0.0)
+    parser.add_argument("--arm-swing-frequency", type=float, default=1.35)
+    parser.add_argument("--arm-swing-vx-scale", type=float, default=0.35)
     parser.add_argument("--log-path", default=None)
+    parser.add_argument(
+        "--log-folder",
+        default=None,
+        help="Optional subfolder under logs/<name>/logs for separating physical-gr2 and simulation-gr2 runs.",
+    )
     parser.add_argument("--log-flush-rows", type=int, default=50)
     parser.add_argument("--no-log", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    for name in ("filter_x", "filter_y", "filter_yaw"):
+        value = getattr(args, name)
+        if not 0.0 <= value < 1.0:
+            parser.error(f"--{name.replace('_', '-')} must be in [0.0, 1.0); got {value}")
+
+    for name in ("ankle_pitch_scale", "ankle_roll_scale"):
+        value = getattr(args, name)
+        if value <= 0.0:
+            parser.error(f"--{name.replace('_', '-')} must be positive; got {value}")
+
+    for name in ("arm_swing_amplitude", "arm_swing_elbow_amplitude"):
+        value = getattr(args, name)
+        if value < 0.0:
+            parser.error(f"--{name.replace('_', '-')} must be non-negative; got {value}")
+
+    for name in ("arm_swing_frequency", "arm_swing_vx_scale"):
+        value = getattr(args, name)
+        if value <= 0.0:
+            parser.error(f"--{name.replace('_', '-')} must be positive; got {value}")
+
+    if args.out_back_distance < 0.0:
+        parser.error(f"--out-back-distance must be non-negative; got {args.out_back_distance}")
+    if args.out_back_distance > 0.0:
+        if abs(args.out_vx) <= 1.0e-6:
+            parser.error("--out-vx must be non-zero when --out-back-distance is used")
+        if abs(args.back_vx) <= 1.0e-6:
+            parser.error("--back-vx must be non-zero when --out-back-distance is used")
+
+    return args
 
 
 def main():
