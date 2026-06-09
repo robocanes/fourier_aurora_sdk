@@ -1,0 +1,134 @@
+
+LowerBodyCpgTask_Config:
+  dt: 0.02 # 时间步长
+  control_freq: 50 # 控制频率
+
+  robot_joint_num: 29 # 机器人关节数量
+  control_joint_num: 12 # 6+6 实际控制关节数量
+  control_group_names: ["left_leg", "right_leg"] # 控制关节组名称
+
+  lower_body_control_group_names: ["left_leg", "right_leg", "waist"] # 控制关节组名称 下身
+  upper_body_control_group_names: ["left_manipulator", "right_manipulator"] # 控制关节组名称 上身
+
+  warmup_time: 1.0 # 热机时间
+  warmup_coff: 0.5 # 热机系数
+
+  default_pos: [ # 默认关节位置
+    [-0.1309,  0.00,  0.00,   0.2618,   -0.1309,   0.00],
+    [-0.1309,  0.00,  0.00,   0.2618,   -0.1309,   0.00],
+    [0.00],
+    [0.00, 0.00],
+    [0.02,  0.08,  0.00,  0.08,  0.00,  0.00, 0.00],
+    [0.02,  -0.08,  0.00,  0.08,  0.00,  0.00, 0.00]
+  ]
+
+  arm_scale: [0.20,  0.00,  0.12,  0.03,  0.00,  0.00, 0.00] # 摆臂缩放系数
+
+  kp_joint_space: [
+    [90, 180, 120, 90, 30, 60],
+    [90, 180, 120, 90, 30, 60],
+    [200],
+    [100, 100],
+    [300, 300, 100, 100, 50, 50, 50],
+    [300, 300, 100, 100, 50, 50, 50],
+  ]
+  kd_joint_space: [
+    [19, 10, 9, 19, 5, 3.5],
+    [19, 10, 9, 19, 5, 3.5],
+    [10],
+    [8, 8],
+    [10, 10, 5, 5, 5, 5, 5],
+    [10, 10, 5, 5, 5, 5, 5],
+  ] 
+
+
+CpgRLPolicy_Config:
+  policy_path: "policy/gr2t2v2_mix_without_waist_new20.pt"
+  obs_scales_lin_vel: 1.0 # 线性速度缩放
+  obs_scales_ang_vel: 1.0 # 角速度缩放
+  obs_scale_gravity: 1.0 # 重力缩放
+  obs_scale_joint_pos: 1.0 # 关节位置缩放
+  obs_scale_joint_vel: 0.1 # 关节速度缩放
+  obs_scale_height_measurements: 5.0 # 高度测量缩放
+  obs_scale_action: 1.0 # 动作缩放
+  act_scale_action: [
+    2.0, 1.0, 1.0, 2.0, 2.0, 1.0,
+    2.0, 1.0, 1.0, 2.0, 2.0, 1.0,
+  ]
+
+  num_envs: 1 # 环境数量
+  num_actor_obs: 49 # 观测数量
+  num_actor_hist: 40 # 历史数量
+
+  command_filter_cf: 0.8 # 运动指令滤波截止频率
+
+  command_safety_ratio: 1.0 # 运动指令安全系数
+
+  command_vel_x_range: [-0.50, 0.20] # 运动指令线性速度x范围
+  command_vel_y_range: [-0.50, 0.50] # 运动指令线性速度y范围
+  command_vel_yaw_range: [-1.0, 1.0] # 运动指令角速度范围
+
+
+  # 关节动作输出范围限制（弧度制）
+  actor_output_max: [
+    2.6180, 1.5708, 1.5708, 2.3562, 0.7854, 0.38397,
+    2.6180, 0.5934, 0.6981, 2.3562, 0.7854, 0.38397
+  ]
+  actor_output_min: [
+    -2.6180, -0.5934, -0.6981, -0.0873, -0.7854, -0.38397,
+    -2.6180, -1.5708, -1.5708, -0.0873, -0.7854, -0.38397
+  ]
+
+  # 动作裁剪范围（在原始限制基础上增加安全余量)
+  actor_output_clip_margin_max: [
+    1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+    1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+  ]
+  actor_output_clip_margin_min: [    
+    -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
+    -1.0, -1.0, -1.0, -1.0, -1.0, -1.0
+  ]
+
+  joint_torque_limit: [
+    300.0, 100.0, 100.0, 300.0, 100.0, 100.0,
+    300.0, 100.0, 100.0, 300.0, 100.0, 100.0
+  ]
+
+
+Gait_Config:
+  num_legs: 2 # 腿数量
+  step_period: 0.82 # 步态周期
+  reference_speed: 0.5 # 参考速度
+
+  cycle_r_range: [0.001, 1.0] # 振荡器极限环半径范围
+
+  coff_b: 1000.0 # 振荡器常数
+  rate_xy: 10.0 # ？
+
+  Gait_pattern:
+    GAIT_PATTERN_OFF:
+      step_freq: 1.22 # 1.0 / 0.82
+      cycle_r: 0.001 # min
+      coupling_change_rate: 2.0
+      amplitude_change_rate: 0.995
+      phase_offset_target: [0.0, 0.0]
+      contact_ratio: [0.5, 0.5]
+      step_height_target: [0.0, 0.0]
+
+    GAIT_PATTERN_STAND:
+      step_freq: 1.22 # 1.0 / 0.82
+      cycle_r: 0.001 # min
+      coupling_change_rate: 2.0
+      amplitude_change_rate: 0.995
+      phase_offset_target: [0.0, 0.0]
+      contact_ratio: [0.5, 0.5]
+      step_height_target: [0.04, 0.04]
+
+    GAIT_PATTERN_WALK:
+      step_freq: 1.22 # 1.0 / 0.82
+      cycle_r: 1.0 # max
+      coupling_change_rate: 4.0
+      amplitude_change_rate: 1.08
+      phase_offset_target: [0.0, -3.14159]
+      contact_ratio: [0.62, 0.62]
+      step_height_target: [0.075, 0.075]
