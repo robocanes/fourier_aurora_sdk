@@ -3,6 +3,7 @@
 import argparse
 import csv
 import os
+import select
 import struct
 import sys
 import threading
@@ -18,6 +19,30 @@ POLICY_NUM_ACTIONS = 21
 OBS_LEN = 88
 STACK_SIZE = 5
 ARM_ACTION_INDICES = numpy.array([13, 14, 15, 16, 17, 18, 19, 20], dtype=numpy.int64)
+
+ACTION_NAMES = [
+    "left_hip_pitch",
+    "left_hip_roll",
+    "left_hip_yaw",
+    "left_knee",
+    "left_ankle_pitch",
+    "left_ankle_roll",
+    "right_hip_pitch",
+    "right_hip_roll",
+    "right_hip_yaw",
+    "right_knee",
+    "right_ankle_pitch",
+    "right_ankle_roll",
+    "waist_yaw",
+    "left_shoulder_pitch",
+    "left_shoulder_roll",
+    "left_shoulder_yaw",
+    "left_elbow",
+    "right_shoulder_pitch",
+    "right_shoulder_roll",
+    "right_shoulder_yaw",
+    "right_elbow",
+]
 
 GROUP_NAMES = [
     "left_leg",
@@ -89,6 +114,7 @@ class UpperBodyPolicyRunner:
         self.stop_event = threading.Event()
         self.axis_left = (0.0, 0.0)
         self.axis_right = (0.0, 0.0)
+        self.joystick_axes = {}
         self.commands_filtered = numpy.array([args.vx, args.vy, args.yaw], dtype=numpy.float32)
         self.pygame = None
         self.joystick = None
@@ -115,13 +141,13 @@ class UpperBodyPolicyRunner:
         if policy_path is None:
             policy_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
-                "policy_gr2_dynamic_walk_model13999_jit.pt",
+                "policy_gr2_dynamic_walk_model15199_yaw_ankle_smooth_jit.pt",
             )
         if not os.path.exists(policy_path):
             raise FileNotFoundError(
                 f"Policy file not found: {policy_path}\n"
-                "Copy/export the proven model_13999 JIT policy to "
-                "policy_gr2_dynamic_walk_model13999_jit.pt first."
+                "Copy/export the proven model_15199 yaw/ankle smooth JIT policy to "
+                "policy_gr2_dynamic_walk_model15199_yaw_ankle_smooth_jit.pt first."
             )
         self.policy_model = torch.jit.load(policy_path, map_location=torch.device("cpu"))
         self.policy_model.eval()
@@ -232,8 +258,11 @@ class UpperBodyPolicyRunner:
     def pygame_joystick_listener(self):
         while not self.stop_event.is_set():
             self.pygame.event.get()
-            self.axis_left = self.joystick.get_axis(0), self.joystick.get_axis(1)
-            self.axis_right = self.joystick.get_axis(3), 0.0
+            axes = {}
+            for axis in range(self.joystick.get_numaxes()):
+                axes[axis] = self.joystick.get_axis(axis)
+            self.joystick_axes = axes
+            self.update_legacy_axis_pairs()
             time.sleep(0.02)
 
     def linux_joystick_listener(self):
@@ -247,8 +276,20 @@ class UpperBodyPolicyRunner:
             _, value, event_type, number = struct.unpack("IhBB", event)
             if event_type & 0x02:
                 axes[number] = max(-1.0, min(1.0, value / 32767.0))
-                self.axis_left = axes.get(0, 0.0), axes.get(1, 0.0)
-                self.axis_right = axes.get(3, 0.0), 0.0
+                self.joystick_axes = axes.copy()
+                self.update_legacy_axis_pairs()
+
+    def joystick_axis(self, axis_number):
+        if axis_number < 0:
+            return 0.0
+        return float(self.joystick_axes.get(axis_number, 0.0))
+
+    def update_legacy_axis_pairs(self):
+        self.axis_left = (
+            self.joystick_axis(self.args.joystick_lateral_axis),
+            self.joystick_axis(self.args.joystick_forward_axis),
+        )
+        self.axis_right = (self.joystick_axis(self.args.joystick_yaw_axis), 0.0)
 
     def set_pd(self):
         kp_config = {
@@ -285,10 +326,12 @@ class UpperBodyPolicyRunner:
     def update_command(self):
         if self.args.joystick:
             commands_norm = numpy.array([
-                -self.axis_left[1],
-                -self.axis_left[0],
-                -self.axis_right[0],
+                -self.joystick_axis(self.args.joystick_forward_axis),
+                -self.joystick_axis(self.args.joystick_lateral_axis),
+                -self.joystick_axis(self.args.joystick_yaw_axis),
             ], dtype=numpy.float32)
+            deadzone = self.args.joystick_deadzone
+            commands_norm[numpy.abs(commands_norm) < deadzone] = 0.0
             commands = numpy.array([
                 commands_norm[0] * self.args.max_vx,
                 commands_norm[1] * self.args.max_vy,
@@ -382,6 +425,41 @@ class UpperBodyPolicyRunner:
         self.arm_swing_phase = 0.0
         self.last_policy_time = None
 
+    def read_projected_gravity(self):
+        imu_quat = numpy.asarray(self.client.get_base_data("quat_xyzw"), dtype=numpy.float32)
+        torch_quat = torch.from_numpy(imu_quat).float().unsqueeze(0)
+        torch_gravity = torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32)
+        return torch_quat_rotate_inverse(torch_quat, torch_gravity).squeeze(0).numpy()
+
+    def check_start_state(self):
+        projected_gravity = self.read_projected_gravity()
+        q, qd = self.read_joint_state()
+        omega = numpy.asarray(self.client.get_base_data("omega_B"), dtype=numpy.float32)
+        tilt_xy = float(numpy.max(numpy.abs(projected_gravity[:2])))
+        max_qd = float(numpy.max(numpy.abs(qd)))
+        omega_norm = float(numpy.linalg.norm(omega))
+        print(
+            "start_state "
+            f"gravity={projected_gravity[0]:+.3f},{projected_gravity[1]:+.3f},{projected_gravity[2]:+.3f} "
+            f"omega_norm={omega_norm:.3f} max_qd={max_qd:.3f} "
+            f"left_leg={numpy.array2string(q[:6], precision=3, separator=',')} "
+            f"right_leg={numpy.array2string(q[6:12], precision=3, separator=',')}"
+        )
+        if self.args.skip_start_check:
+            return
+        if projected_gravity[2] > self.args.min_start_gravity_z or tilt_xy > self.args.max_start_tilt_xy:
+            raise RuntimeError(
+                "Refusing to enter UserCmd: robot/IMU is not upright enough. "
+                f"gravity={projected_gravity.tolist()}, "
+                f"need z <= {self.args.min_start_gravity_z:.2f} and "
+                f"max(|x|,|y|) <= {self.args.max_start_tilt_xy:.2f}."
+            )
+        if max_qd > self.args.max_start_qd:
+            raise RuntimeError(
+                "Refusing to enter UserCmd: joints are still moving too much. "
+                f"max_qd={max_qd:.3f}, limit={self.args.max_start_qd:.3f}."
+            )
+
     def make_observation(self):
         imu_quat = numpy.asarray(self.client.get_base_data("quat_xyzw"), dtype=numpy.float32)
         imu_angular_velocity = numpy.asarray(self.client.get_base_data("omega_B"), dtype=numpy.float32)
@@ -465,7 +543,7 @@ class UpperBodyPolicyRunner:
             self.log_file.flush()
             self.log_rows_since_flush = 0
 
-    def step_policy(self, loop_overrun_s=0.0):
+    def step_policy(self, loop_overrun_s=0.0, send_command=True):
         step_start = time.monotonic()
         self.update_command()
         self.update_arm_swing_phase(step_start)
@@ -500,20 +578,54 @@ class UpperBodyPolicyRunner:
         whole_body_target = DEFAULT_WHOLE_BODY_POSITION.copy()
         whole_body_target[ACTION_TO_WHOLE_BODY_INDEX] = action_target
 
-        self.client.set_joint_positions({"whole_body": whole_body_target.astype(numpy.float64)})
+        if send_command:
+            self.client.set_joint_positions({"whole_body": whole_body_target.astype(numpy.float64)})
         self.write_telemetry(time.monotonic() - step_start, loop_overrun_s, action_target)
 
         now = time.monotonic()
         if not hasattr(self, "_last_print") or now - self._last_print > self.args.print_period:
             self._last_print = now
+            max_action_idx = int(numpy.argmax(numpy.abs(self.policy_action)))
+            max_action_name = ACTION_NAMES[max_action_idx]
+            max_action_value = float(self.policy_action[max_action_idx])
+            tilt_xy = 0.0
+            if self.latest_projected_gravity is not None:
+                tilt_xy = float(numpy.max(numpy.abs(self.latest_projected_gravity[:2])))
+            max_qd = 0.0
+            if self.latest_qd is not None:
+                max_qd = float(numpy.max(numpy.abs(self.latest_qd)))
             print(
                 "cmd="
                 f"{self.commands_filtered[0]:+.3f},"
                 f"{self.commands_filtered[1]:+.3f},"
                 f"{self.commands_filtered[2]:+.3f} "
                 f"ramp={ramp:.2f} "
-                f"action_abs_max={numpy.max(numpy.abs(self.policy_action)):.3f}"
+                f"action_abs_max={numpy.max(numpy.abs(self.policy_action)):.3f} "
+                f"max_action={max_action_idx}:{max_action_name}={max_action_value:+.3f} "
+                f"tilt_xy={tilt_xy:.3f} "
+                f"max_qd={max_qd:.3f} "
+                f"joy_axes={{{', '.join(f'{k}:{v:+.2f}' for k, v in sorted(self.joystick_axes.items()))}}}"
             )
+        return whole_body_target
+
+    def hold_entry_pose(self):
+        whole_body_target = DEFAULT_WHOLE_BODY_POSITION.copy()
+        whole_body_target[ACTION_TO_WHOLE_BODY_INDEX] = self.entry_action_start
+        self.client.set_joint_positions({"whole_body": whole_body_target.astype(numpy.float64)})
+
+    def wait_for_policy_start(self):
+        print(
+            "Streaming the measured entry pose. "
+            "Confirm the robot is stable, then press Enter to start the policy."
+        )
+        period = 1.0 / self.args.rate
+        while not self.stop_event.is_set():
+            self.hold_entry_pose()
+            ready, _, _ = select.select([sys.stdin], [], [], period)
+            if ready:
+                sys.stdin.readline()
+                break
+        self.reset_policy_state_from_robot()
 
     def arm_hang_action_position(self):
         action_position = DEFAULT_ACTION_POSITION.copy()
@@ -572,10 +684,13 @@ class UpperBodyPolicyRunner:
             "When the robot is stable, press Enter to switch to "
             f"FSM state {self.args.usercmd_fsm_state} (UserCmd)"
         )
+        self.check_start_state()
         self.reset_policy_state_from_robot()
         self.client.set_fsm_state(self.args.usercmd_fsm_state)
         time.sleep(self.args.entry_hold_s)
         self.set_pd()
+        if self.args.start_paused:
+            self.wait_for_policy_start()
         if self.args.straight_turn_distance > 0.0:
             self.sequence_start_time = time.monotonic()
             print(
@@ -660,6 +775,15 @@ def parse_args():
     parser.add_argument("--exit-fsm-state", type=int, default=2, help="FSM state restored during shutdown.")
     parser.add_argument("--joystick", action="store_true")
     parser.add_argument("--joystick-device", default="/dev/input/js0")
+    parser.add_argument("--joystick-deadzone", type=float, default=0.08)
+    parser.add_argument("--joystick-forward-axis", type=int, default=1)
+    parser.add_argument("--joystick-lateral-axis", type=int, default=0)
+    parser.add_argument("--joystick-yaw-axis", type=int, default=3)
+    parser.add_argument(
+        "--joystick-test",
+        action="store_true",
+        help="Print raw Linux joystick axis events and exit without connecting to Aurora.",
+    )
     parser.add_argument("--vx", type=float, default=0.0)
     parser.add_argument("--vy", type=float, default=0.0)
     parser.add_argument("--yaw", type=float, default=0.0)
@@ -672,25 +796,34 @@ def parse_args():
     parser.add_argument("--straight-turn-angle-deg", type=float, default=90.0)
     parser.add_argument("--sequence-stop-s", type=float, default=1.5)
     parser.add_argument("--sequence-exit", action="store_true")
-    parser.add_argument("--max-vx", type=float, default=0.35)
-    parser.add_argument("--max-vy", type=float, default=0.08)
-    parser.add_argument("--max-yaw", type=float, default=0.35)
+    parser.add_argument("--max-vx", type=float, default=0.30)
+    parser.add_argument("--max-vy", type=float, default=0.0)
+    parser.add_argument("--max-yaw", type=float, default=0.60)
     parser.add_argument("--ankle-pitch-scale", type=float, default=1.0)
     parser.add_argument("--ankle-roll-scale", type=float, default=1.0)
     parser.add_argument("--filter-x", type=float, default=0.92)
     parser.add_argument("--filter-y", type=float, default=0.40)
-    parser.add_argument("--filter-yaw", type=float, default=0.00)
+    parser.add_argument("--filter-yaw", type=float, default=0.45)
     parser.add_argument("--print-period", type=float, default=1.0)
     parser.add_argument("--entry-ramp-s", type=float, default=1.0)
     parser.add_argument("--entry-hold-s", type=float, default=0.1)
+    parser.add_argument("--max-start-tilt-xy", type=float, default=0.20)
+    parser.add_argument("--min-start-gravity-z", type=float, default=-0.95)
+    parser.add_argument("--max-start-qd", type=float, default=1.0)
+    parser.add_argument("--skip-start-check", action="store_true")
+    parser.add_argument(
+        "--start-paused",
+        action="store_true",
+        help="Stream the measured entry pose in UserCmd until Enter is pressed.",
+    )
     parser.add_argument("--free-arms", action="store_true", help="Use policy arm actions instead of holding a neutral hanging arm pose.")
     parser.add_argument("--arm-shoulder-pitch", type=float, default=0.0)
     parser.add_argument("--arm-shoulder-roll", type=float, default=0.0)
     parser.add_argument("--arm-shoulder-yaw", type=float, default=0.0)
     parser.add_argument("--arm-elbow-pitch", type=float, default=0.0)
-    parser.add_argument("--arm-swing-amplitude", type=float, default=0.0)
-    parser.add_argument("--arm-swing-elbow-amplitude", type=float, default=0.0)
-    parser.add_argument("--arm-swing-frequency", type=float, default=1.35)
+    parser.add_argument("--arm-swing-amplitude", type=float, default=0.08)
+    parser.add_argument("--arm-swing-elbow-amplitude", type=float, default=0.03)
+    parser.add_argument("--arm-swing-frequency", type=float, default=1.25)
     parser.add_argument("--arm-swing-vx-scale", type=float, default=0.35)
     parser.add_argument("--log-path", default=None)
     parser.add_argument(
@@ -706,6 +839,9 @@ def parse_args():
         value = getattr(args, name)
         if not 0.0 <= value < 1.0:
             parser.error(f"--{name.replace('_', '-')} must be in [0.0, 1.0); got {value}")
+
+    if not 0.0 <= args.joystick_deadzone < 1.0:
+        parser.error(f"--joystick-deadzone must be in [0.0, 1.0); got {args.joystick_deadzone}")
 
     for name in ("ankle_pitch_scale", "ankle_roll_scale"):
         value = getattr(args, name)
@@ -742,10 +878,43 @@ def parse_args():
     return args
 
 
+def joystick_test(device_path):
+    if not os.path.exists(device_path):
+        raise RuntimeError(f"Joystick device not found: {device_path}")
+
+    print(f"Reading joystick events from {device_path}. Press Ctrl-C to stop.")
+    axes = {}
+    with open(device_path, "rb", buffering=0) as device:
+        while True:
+            ready, _, _ = select.select([device], [], [], 1.0)
+            if not ready:
+                print("no events")
+                continue
+
+            event = device.read(8)
+            if len(event) != 8:
+                continue
+            timestamp_ms, value, event_type, number = struct.unpack("IhBB", event)
+            event_kind = event_type & ~0x80
+            init = " init" if event_type & 0x80 else ""
+            if event_kind == 0x02:
+                axes[number] = max(-1.0, min(1.0, value / 32767.0))
+                print(
+                    f"{timestamp_ms:10d} axis {number:02d}{init}: "
+                    f"{axes[number]:+0.3f} axes={axes}"
+                )
+            elif event_kind == 0x01:
+                print(f"{timestamp_ms:10d} button {number:02d}{init}: {value}")
+
+
 def main():
     runner = None
     try:
-        runner = UpperBodyPolicyRunner(parse_args())
+        args = parse_args()
+        if args.joystick_test:
+            joystick_test(args.joystick_device)
+            return
+        runner = UpperBodyPolicyRunner(args)
         runner.run()
     except KeyboardInterrupt:
         pass

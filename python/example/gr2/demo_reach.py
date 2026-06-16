@@ -50,37 +50,28 @@ DEFAULT_WHOLE_BODY_POSITION = numpy.array([
     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
 ], dtype=numpy.float32)
 
-# The reach policy was trained on GR2_raw.urdf order:
-# waist, head, left arm, right arm, left leg, right leg.
-# Aurora whole_body commands use SDK group order:
+# Reach policy action order matches Aurora whole_body order:
 # left leg, right leg, waist, head, left arm, right arm.
-# The policy was trained in the correct SDK group order natively.
-ACTION_TO_WHOLE_BODY_INDEX = numpy.array([
-    12,
-    13, 14,
-    15, 16, 17, 18, 19, 20, 21,
-    22, 23, 24, 25, 26, 27, 28,
-    0, 1, 2, 3, 4, 5,
-    6, 7, 8, 9, 10, 11,
-], dtype=numpy.int64)
+ACTION_TO_WHOLE_BODY_INDEX = numpy.arange(ROBOT_NUM_JOINTS, dtype=numpy.int64)
 
-MAIN_BODY_ACTION_INDICES = numpy.array([
-    0,
-    17, 18, 19, 20, 21, 22,
-    23, 24, 25, 26, 27, 28,
-], dtype=numpy.int64)
-HEAD_ACTION_INDICES = numpy.array([1, 2], dtype=numpy.int64)
-ARM_ACTION_INDICES = numpy.arange(3, 17, dtype=numpy.int64)
-LEFT_ARM_ACTION_INDICES = numpy.arange(3, 10, dtype=numpy.int64)
-RIGHT_ARM_ACTION_INDICES = numpy.arange(10, 17, dtype=numpy.int64)
+MAIN_BODY_ACTION_INDICES = numpy.arange(0, 13, dtype=numpy.int64)
+LEG_ACTION_INDICES = numpy.arange(0, 12, dtype=numpy.int64)
+WAIST_ACTION_INDICES = numpy.array([12], dtype=numpy.int64)
+HEAD_ACTION_INDICES = numpy.array([13, 14], dtype=numpy.int64)
+ARM_ACTION_INDICES = numpy.arange(15, 29, dtype=numpy.int64)
+LEFT_ARM_ACTION_INDICES = numpy.arange(15, 22, dtype=numpy.int64)
+RIGHT_ARM_ACTION_INDICES = numpy.arange(22, 29, dtype=numpy.int64)
 
 MAIN_BODY_WHOLE_BODY_INDICES = numpy.array([
     0, 1, 2, 3, 4, 5,
     6, 7, 8, 9, 10, 11,
     12,
 ], dtype=numpy.int64)
+LEG_WHOLE_BODY_INDICES = numpy.arange(0, 12, dtype=numpy.int64)
+HEAD_WHOLE_BODY_INDICES = numpy.array([13, 14], dtype=numpy.int64)
 LEFT_ARM_WHOLE_BODY_INDICES = numpy.arange(15, 22, dtype=numpy.int64)
 RIGHT_ARM_WHOLE_BODY_INDICES = numpy.arange(22, 29, dtype=numpy.int64)
+ARM_WHOLE_BODY_INDICES = numpy.arange(15, 29, dtype=numpy.int64)
 
 DEFAULT_ACTION_POSITION = DEFAULT_WHOLE_BODY_POSITION[ACTION_TO_WHOLE_BODY_INDEX]
 
@@ -179,6 +170,44 @@ RAW_ACTION_CLIP_MAX = ACTION_MAX + 1.0
 # Keep the default conservative while allowing --raw-action-clip-abs 100 for exact Gym-style tests.
 RAW_ACTION_CLIP_ABS = 4.0
 
+LEGACY_POLICY_NUM_ACTIONS = 27
+LEGACY_OBS_LEN = 99
+LEGACY_ACTION_TO_WHOLE_BODY_INDEX = numpy.array([
+    0, 1, 2, 3, 4, 5,
+    6, 7, 8, 9, 10, 11,
+    12,
+    15, 16, 17, 18, 19, 20, 21,
+    22, 23, 24, 25, 26, 27, 28,
+], dtype=numpy.int64)
+LEGACY_MAIN_BODY_ACTION_INDICES = numpy.arange(0, 13, dtype=numpy.int64)
+LEGACY_LEG_ACTION_INDICES = numpy.arange(0, 12, dtype=numpy.int64)
+LEGACY_WAIST_ACTION_INDICES = numpy.array([12], dtype=numpy.int64)
+LEGACY_ARM_ACTION_INDICES = numpy.arange(13, 27, dtype=numpy.int64)
+LEGACY_LEFT_ARM_ACTION_INDICES = numpy.arange(13, 20, dtype=numpy.int64)
+LEGACY_RIGHT_ARM_ACTION_INDICES = numpy.arange(20, 27, dtype=numpy.int64)
+LEGACY_DEFAULT_ACTION_POSITION = DEFAULT_WHOLE_BODY_POSITION[LEGACY_ACTION_TO_WHOLE_BODY_INDEX]
+LEGACY_ACTION_SCALE = numpy.array([
+    0.12, 0.08, 0.08, 0.12, 0.10, 0.08,
+    0.12, 0.08, 0.08, 0.12, 0.10, 0.08,
+    0.25,
+    0.35, 0.22, 0.28, 0.28, 0.18, 0.18, 0.18,
+    0.35, 0.22, 0.28, 0.28, 0.18, 0.18, 0.18,
+], dtype=numpy.float32)
+LEGACY_ACTION_MIN = numpy.array([
+    -2.6180, -0.5934, -0.6981, -0.0873, -0.7854, -0.38397,
+    -2.6180, -1.5708, -1.5708, -0.0873, -0.7854, -0.38397,
+    -2.6180,
+    -2.9671, -0.5236, -1.8326, -1.5272, -1.8326, -0.6109, -0.9600,
+    -2.9671, -2.7925, -1.8326, -1.5272, -1.8326, -0.6109, -0.9600,
+], dtype=numpy.float32)
+LEGACY_ACTION_MAX = numpy.array([
+    2.6180, 1.5708, 1.5708, 2.3562, 0.7854, 0.38397,
+    2.6180, 0.5934, 0.6981, 2.3562, 0.7854, 0.38397,
+    2.6180,
+    2.9671, 2.7925, 1.8326, 0.4800, 1.8326, 0.6109, 0.9600,
+    2.9671, 0.5236, 1.8326, 0.4800, 1.8326, 0.6109, 0.9600,
+], dtype=numpy.float32)
+
 
 class ReachPolicyRunner:
     def __init__(self, args):
@@ -253,6 +282,7 @@ class ReachPolicyRunner:
 
         self.policy_model = torch.jit.load(policy_path, map_location=torch.device("cpu"))
         self.policy_model.eval()
+        self.configure_policy_contract()
         print(f"Loaded policy: {policy_path}")
         print(
             "Runtime settings: "
@@ -280,6 +310,57 @@ class ReachPolicyRunner:
             self.balance_policy_model = torch.jit.load(balance_policy_path, map_location=torch.device("cpu"))
             self.balance_policy_model.eval()
             print(f"Loaded balance policy: {balance_policy_path}")
+
+    def configure_policy_contract(self):
+        first_linear_in = None
+        last_linear_out = None
+        for _, param in self.policy_model.named_parameters():
+            if param.ndim == 2:
+                if first_linear_in is None:
+                    first_linear_in = int(param.shape[1])
+                last_linear_out = int(param.shape[0])
+
+        if first_linear_in == LEGACY_OBS_LEN * STACK_SIZE and last_linear_out == LEGACY_POLICY_NUM_ACTIONS:
+            self.policy_num_actions = LEGACY_POLICY_NUM_ACTIONS
+            self.obs_len = LEGACY_OBS_LEN
+            self.legacy_policy_contract = True
+            self.action_to_whole_body_index = LEGACY_ACTION_TO_WHOLE_BODY_INDEX
+            self.default_action_position = LEGACY_DEFAULT_ACTION_POSITION
+            self.action_scale = LEGACY_ACTION_SCALE
+            self.action_min = LEGACY_ACTION_MIN
+            self.action_max = LEGACY_ACTION_MAX
+            self.main_body_action_indices = LEGACY_MAIN_BODY_ACTION_INDICES
+            self.leg_action_indices = LEGACY_LEG_ACTION_INDICES
+            self.waist_action_indices = LEGACY_WAIST_ACTION_INDICES
+            self.head_action_indices = numpy.array([], dtype=numpy.int64)
+            self.arm_action_indices = LEGACY_ARM_ACTION_INDICES
+            self.left_arm_action_indices = LEGACY_LEFT_ARM_ACTION_INDICES
+            self.right_arm_action_indices = LEGACY_RIGHT_ARM_ACTION_INDICES
+            print("Detected legacy reach contract: 99 obs x 5, 27 actions (waist + arms, no head actions).")
+        elif first_linear_in == OBS_LEN * STACK_SIZE and last_linear_out == POLICY_NUM_ACTIONS:
+            self.policy_num_actions = POLICY_NUM_ACTIONS
+            self.obs_len = OBS_LEN
+            self.legacy_policy_contract = False
+            self.action_to_whole_body_index = ACTION_TO_WHOLE_BODY_INDEX
+            self.default_action_position = DEFAULT_ACTION_POSITION
+            self.action_scale = ACTION_SCALE
+            self.action_min = ACTION_MIN
+            self.action_max = ACTION_MAX
+            self.main_body_action_indices = MAIN_BODY_ACTION_INDICES
+            self.leg_action_indices = LEG_ACTION_INDICES
+            self.waist_action_indices = WAIST_ACTION_INDICES
+            self.head_action_indices = HEAD_ACTION_INDICES
+            self.arm_action_indices = ARM_ACTION_INDICES
+            self.left_arm_action_indices = LEFT_ARM_ACTION_INDICES
+            self.right_arm_action_indices = RIGHT_ARM_ACTION_INDICES
+        else:
+            raise RuntimeError(
+                "Unsupported reach policy contract: "
+                f"first_linear_in={first_linear_in}, last_linear_out={last_linear_out}."
+            )
+
+        self.policy_action = numpy.zeros(self.policy_num_actions, dtype=numpy.float32)
+        self.commanded_action = numpy.zeros(self.policy_num_actions, dtype=numpy.float32)
 
     def set_active_arm(self, arm):
         self.active_arm = arm
@@ -358,9 +439,9 @@ class ReachPolicyRunner:
         return float(alpha)
 
     def action_from_whole_body_target(self, whole_body_target):
-        action_target = whole_body_target[ACTION_TO_WHOLE_BODY_INDEX]
-        effective_action = (action_target - DEFAULT_ACTION_POSITION) / ACTION_SCALE
-        return numpy.clip(effective_action, RAW_ACTION_CLIP_MIN, RAW_ACTION_CLIP_MAX).astype(numpy.float32)
+        action_target = whole_body_target[self.action_to_whole_body_index]
+        effective_action = (action_target - self.default_action_position) / self.action_scale
+        return numpy.clip(effective_action, -self.args.raw_action_clip_abs, self.args.raw_action_clip_abs).astype(numpy.float32)
 
     def set_pd(self):
         kp_config = {
@@ -398,9 +479,13 @@ class ReachPolicyRunner:
         if self.hold_whole_body_position is None:
             q, _ = self.read_joint_state()
             self.hold_whole_body_position = q.copy()
-            offset = (
-                self.hold_whole_body_position[ACTION_TO_WHOLE_BODY_INDEX] - DEFAULT_ACTION_POSITION
-            ) * OBS_DOF_POS_SCALE
+            if self.legacy_policy_contract:
+                offset = (self.hold_whole_body_position - DEFAULT_WHOLE_BODY_POSITION) * DOF_POS_OBS_SCALE
+            else:
+                offset = (
+                    self.hold_whole_body_position[self.action_to_whole_body_index]
+                    - self.default_action_position
+                ) * OBS_DOF_POS_SCALE
             print(
                 "Captured hold pose: "
                 f"obs_offset_abs_max={numpy.max(numpy.abs(offset)):.3f} "
@@ -533,17 +618,17 @@ class ReachPolicyRunner:
 
     def observation_default_position(self):
         if self.args.hold_only and self.hold_whole_body_position is not None:
-            return self.hold_whole_body_position[ACTION_TO_WHOLE_BODY_INDEX]
+            return self.hold_whole_body_position[self.action_to_whole_body_index]
         if self.args.obs_reference == "hold" and self.hold_whole_body_position is not None:
-            return self.hold_whole_body_position[ACTION_TO_WHOLE_BODY_INDEX]
-        return DEFAULT_ACTION_POSITION
+            return self.hold_whole_body_position[self.action_to_whole_body_index]
+        return self.default_action_position
 
     def action_default_position(self):
         if self.args.hold_only and self.hold_whole_body_position is not None:
-            return self.hold_whole_body_position[ACTION_TO_WHOLE_BODY_INDEX]
+            return self.hold_whole_body_position[self.action_to_whole_body_index]
         if self.args.action_reference == "hold" and self.hold_whole_body_position is not None:
-            return self.hold_whole_body_position[ACTION_TO_WHOLE_BODY_INDEX]
-        return DEFAULT_ACTION_POSITION
+            return self.hold_whole_body_position[self.action_to_whole_body_index]
+        return self.default_action_position
 
     def active_manipulator_group(self):
         return "left_manipulator" if self.active_arm == "left" else "right_manipulator"
@@ -683,10 +768,17 @@ class ReachPolicyRunner:
             imu_angular_velocity = numpy.zeros_like(imu_angular_velocity)
         if self.args.zero_dof_vel:
             qd = numpy.zeros_like(qd)
-        q_policy_order = q[ACTION_TO_WHOLE_BODY_INDEX]
-        qd_policy_order = qd[ACTION_TO_WHOLE_BODY_INDEX]
-        q_offset_obs = (q_policy_order - self.observation_default_position()) * OBS_DOF_POS_SCALE
-        qd_obs = qd_policy_order * OBS_DOF_VEL_SCALE
+        if self.legacy_policy_contract:
+            obs_default = DEFAULT_WHOLE_BODY_POSITION
+            if self.args.obs_reference == "hold" and self.hold_whole_body_position is not None:
+                obs_default = self.hold_whole_body_position
+            q_offset_obs = (q - obs_default) * OBS_DOF_POS_SCALE
+            qd_obs = qd * OBS_DOF_VEL_SCALE
+        else:
+            q_policy_order = q[self.action_to_whole_body_index]
+            qd_policy_order = qd[self.action_to_whole_body_index]
+            q_offset_obs = (q_policy_order - self.observation_default_position()) * OBS_DOF_POS_SCALE
+            qd_obs = qd_policy_order * OBS_DOF_VEL_SCALE
 
         obs = numpy.concatenate([
             self.target_pos,
@@ -699,14 +791,15 @@ class ReachPolicyRunner:
             self.policy_action,
         ]).astype(numpy.float32)
 
-        if obs.shape[0] != OBS_LEN:
-            raise RuntimeError(f"Expected obs len {OBS_LEN}, got {obs.shape[0]}")
+        if obs.shape[0] != self.obs_len:
+            raise RuntimeError(f"Expected obs len {self.obs_len}, got {obs.shape[0]}")
 
         obs_t = torch.from_numpy(obs).float().unsqueeze(0)
         if self.obs_stack is None:
-            self.obs_stack = torch.cat([obs_t] * STACK_SIZE, dim=1).float()
+            self.obs_stack = torch.zeros((1, self.obs_len * STACK_SIZE), dtype=torch.float32)
+            self.obs_stack[:, -self.obs_len:] = obs_t
         else:
-            self.obs_stack = torch.cat([self.obs_stack[:, OBS_LEN:], obs_t], dim=1).float()
+            self.obs_stack = torch.cat([self.obs_stack[:, self.obs_len:], obs_t], dim=1).float()
 
         self.last_obs_debug = {
             "target": float(numpy.max(numpy.abs(self.target_pos))),
@@ -792,19 +885,19 @@ class ReachPolicyRunner:
         balance_target[BALANCE_ACTION_TO_WHOLE_BODY_INDEX] = balance_action_position
         return balance_target
 
-    def step_policy(self):
+    def step_policy(self, send_command=True):
         now = time.monotonic()
         self.maybe_resample_target(now)
         obs_stack = self.make_observation()
 
         if self.args.hold_only:
-            policy_raw_action = numpy.zeros(POLICY_NUM_ACTIONS, dtype=numpy.float32)
+            policy_raw_action = numpy.zeros(self.policy_num_actions, dtype=numpy.float32)
         else:
             with torch.no_grad():
                 policy_raw_action = self.policy_model(obs_stack).detach().cpu().float().numpy().squeeze(0)
 
-        if policy_raw_action.shape[0] != POLICY_NUM_ACTIONS:
-            raise RuntimeError(f"Expected {POLICY_NUM_ACTIONS} actions, got {policy_raw_action.shape[0]}")
+        if policy_raw_action.shape[0] != self.policy_num_actions:
+            raise RuntimeError(f"Expected {self.policy_num_actions} actions, got {policy_raw_action.shape[0]}")
 
         policy_raw_abs_max = numpy.max(numpy.abs(policy_raw_action))
         raw_action = numpy.clip(
@@ -812,21 +905,23 @@ class ReachPolicyRunner:
             -self.args.raw_action_clip_abs,
             self.args.raw_action_clip_abs,
         ).astype(numpy.float32)
-        raw_action[MAIN_BODY_ACTION_INDICES] *= self.args.main_body_gain
-        raw_action[HEAD_ACTION_INDICES] *= self.args.head_gain
-        raw_action[ARM_ACTION_INDICES] *= self.args.arm_gain
+        raw_action[self.main_body_action_indices] *= self.args.main_body_gain
+        raw_action[self.head_action_indices] *= self.args.head_gain
+        raw_action[self.arm_action_indices] *= self.args.arm_gain
 
         if self.args.freeze_main_body or not self.args.command_main_body:
-            raw_action[MAIN_BODY_ACTION_INDICES] = 0.0
+            raw_action[self.main_body_action_indices] = 0.0
+        if self.args.freeze_legs:
+            raw_action[self.leg_action_indices] = 0.0
         if self.args.freeze_head:
-            raw_action[HEAD_ACTION_INDICES] = 0.0
+            raw_action[self.head_action_indices] = 0.0
         if self.args.freeze_arms:
-            raw_action[ARM_ACTION_INDICES] = 0.0
+            raw_action[self.arm_action_indices] = 0.0
         if self.args.active_arm_only:
             if self.active_arm == "left":
-                raw_action[RIGHT_ARM_ACTION_INDICES] = 0.0
+                raw_action[self.right_arm_action_indices] = 0.0
             else:
-                raw_action[LEFT_ARM_ACTION_INDICES] = 0.0
+                raw_action[self.left_arm_action_indices] = 0.0
         if self.args.action_abs_limit > 0.0:
             raw_action = numpy.clip(raw_action, -self.args.action_abs_limit, self.args.action_abs_limit)
 
@@ -840,14 +935,14 @@ class ReachPolicyRunner:
         else:
             self.commanded_action = raw_action
 
-        action_target = self.action_default_position() + self.commanded_action * ACTION_SCALE
-        action_target = numpy.clip(action_target, ACTION_MIN, ACTION_MAX)
+        action_target = self.action_default_position() + self.commanded_action * self.action_scale
+        action_target = numpy.clip(action_target, self.action_min, self.action_max)
 
         if self.args.action_reference == "hold":
             whole_body_target = self.hold_whole_body_position.copy()
         else:
             whole_body_target = DEFAULT_WHOLE_BODY_POSITION.copy()
-        whole_body_target[ACTION_TO_WHOLE_BODY_INDEX] = action_target
+        whole_body_target[self.action_to_whole_body_index] = action_target
 
         balance_target = None
         if self.args.main_body_source == "balance":
@@ -886,6 +981,24 @@ class ReachPolicyRunner:
         if not self.args.command_main_body and self.args.main_body_source != "balance":
             whole_body_target[MAIN_BODY_WHOLE_BODY_INDICES] = \
                 self.hold_whole_body_position[MAIN_BODY_WHOLE_BODY_INDICES]
+        if self.args.freeze_main_body:
+            whole_body_target[MAIN_BODY_WHOLE_BODY_INDICES] = \
+                self.hold_whole_body_position[MAIN_BODY_WHOLE_BODY_INDICES]
+        if self.args.freeze_legs:
+            whole_body_target[LEG_WHOLE_BODY_INDICES] = \
+                self.hold_whole_body_position[LEG_WHOLE_BODY_INDICES]
+        if self.args.freeze_head:
+            whole_body_target[HEAD_WHOLE_BODY_INDICES] = \
+                self.hold_whole_body_position[HEAD_WHOLE_BODY_INDICES]
+        if self.args.freeze_arms:
+            whole_body_target[ARM_WHOLE_BODY_INDICES] = \
+                self.hold_whole_body_position[ARM_WHOLE_BODY_INDICES]
+        elif self.args.active_arm_only:
+            inactive_arm_whole_body_indices = (
+                RIGHT_ARM_WHOLE_BODY_INDICES if self.active_arm == "left" else LEFT_ARM_WHOLE_BODY_INDICES
+            )
+            whole_body_target[inactive_arm_whole_body_indices] = \
+                self.hold_whole_body_position[inactive_arm_whole_body_indices]
 
         startup_ramp_alpha = self.startup_ramp_alpha(now)
         if startup_ramp_alpha < 1.0 and self.startup_ramp_start_pose is not None:
@@ -922,7 +1035,8 @@ class ReachPolicyRunner:
                 print("Startup ramp complete; releasing normal reach policy control.")
             self.policy_action = self.commanded_action.copy()
 
-        self.client.set_joint_positions({"whole_body": whole_body_target.astype(numpy.float64)})
+        if send_command:
+            self.client.set_joint_positions({"whole_body": whole_body_target.astype(numpy.float64)})
 
         if not hasattr(self, "_last_print") or now - self._last_print > self.args.print_period:
             self._last_print = now
@@ -937,12 +1051,14 @@ class ReachPolicyRunner:
                 f"safe_raw_abs_max={numpy.max(numpy.abs(raw_action)):.3f} "
                 f"cmd_abs_max={numpy.max(numpy.abs(self.commanded_action)):.3f} "
                 f"startup_ramp={startup_ramp_alpha:.2f} "
-                f"main_abs_max={numpy.max(numpy.abs(self.commanded_action[MAIN_BODY_ACTION_INDICES])):.3f} "
+                f"main_abs_max={numpy.max(numpy.abs(self.commanded_action[self.main_body_action_indices])):.3f} "
+                f"waist_abs_max={numpy.max(numpy.abs(self.commanded_action[self.waist_action_indices])):.3f} "
                 f"balance_abs_max={numpy.max(numpy.abs(self.balance_policy_action)):.3f} "
-                f"head_abs_max={numpy.max(numpy.abs(self.commanded_action[HEAD_ACTION_INDICES])):.3f} "
-                f"arm_abs_max={numpy.max(numpy.abs(self.commanded_action[ARM_ACTION_INDICES])):.3f} "
+                f"head_abs_max={numpy.max(numpy.abs(self.commanded_action[self.head_action_indices])) if self.head_action_indices.size else 0.0:.3f} "
+                f"arm_abs_max={numpy.max(numpy.abs(self.commanded_action[self.arm_action_indices])):.3f} "
                 f"obs={self.last_obs_debug}"
             )
+        return whole_body_target
 
     def visualize_only_loop(self):
         period = 1.0 / self.args.rate
@@ -1099,6 +1215,7 @@ def parse_args():
     parser.add_argument("--command-main-body", dest="command_main_body", action="store_true", default=True)
     parser.add_argument("--hold-main-body", dest="command_main_body", action="store_false")
     parser.add_argument("--freeze-main-body", action="store_true")
+    parser.add_argument("--freeze-legs", action="store_true")
     parser.add_argument("--freeze-head", action="store_true")
     parser.add_argument("--freeze-arms", action="store_true")
     parser.add_argument("--zero-base-ang-vel", action="store_true")
